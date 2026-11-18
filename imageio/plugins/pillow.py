@@ -40,6 +40,7 @@ from PIL import __version__ as pil_version  # type: ignore
 from ..core.request import URI_BYTES, InitializationError, IOMode, Request
 from ..core.v3_plugin_api import ImageProperties, PluginV3
 from ..typing import ArrayLike
+from .pillow_metadata import MetadataPreserver
 
 
 def pillow_version() -> Tuple[int]:
@@ -392,6 +393,14 @@ class PillowPlugin(PluginV3):
             provided ``mode`` or ``image.shape``. While the latter often works,
             it may cause problems for small images due to aliasing of spatial
             and color-channel axes.
+        preserve_metadata : MetadataPreserver
+            Optional :class:`imageio.plugins.pillow_metadata.MetadataPreserver`
+            carrying ICC/EXIF metadata captured from a source image. If given,
+            the preserved metadata is embedded into the output (unless
+            overridden by an explicit kwarg such as ``icc_profile``) and a
+            discard report becomes available via ``preserver.report``. If
+            None (default), no metadata is preserved and the write behaves
+            exactly as before.
         kwargs : ...
             Extra arguments to pass to pillow. If a writer doesn't recognise an
             option, it is silently ignored. The available options are described
@@ -413,6 +422,13 @@ class PillowPlugin(PluginV3):
                 DeprecationWarning,
             )
             kwargs["duration"] = 1000 * 1 / kwargs.get("fps")
+
+        preserver = kwargs.pop("preserve_metadata", None)
+        if preserver is not None and not isinstance(preserver, MetadataPreserver):
+            raise TypeError(
+                "`preserve_metadata` must be a MetadataPreserver instance, "
+                f"got {type(preserver).__name__}."
+            )
 
         if isinstance(ndimage, list):
             ndimage = np.stack(ndimage, axis=0)
@@ -474,6 +490,17 @@ class PillowPlugin(PluginV3):
                 f" Was `{old_format}`, is now `{format}`.",
                 UserWarning,
             )
+
+        if preserver is not None:
+            # opt-in metadata preservation: embed the captured ICC/EXIF
+            # metadata unless the user explicitly passed their own values
+            preserved_kwargs = preserver.write_kwargs(
+                format=output_format,
+                shape=(ndimage.shape[1], ndimage.shape[2]),
+                n_frames=ndimage.shape[0],
+            )
+            for key, value in preserved_kwargs.items():
+                self.save_args.setdefault(key, value)
 
         self.save_args["format"] = output_format
         self.save_args.update(kwargs)

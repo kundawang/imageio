@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!--next-version-placeholder-->
 
+### Added
+
+- Opt-in metadata preservation pipeline for the Pillow plugin:
+  `imageio.plugins.pillow_metadata.MetadataPreserver` captures the ICC
+  profile and allowlisted EXIF tags from a source image and re-applies them
+  on write (via `iio.imwrite(..., preserve_metadata=preserver)`), with a
+  queryable discard report (`preserver.report`). When the EXIF orientation
+  was applied to the pixels, the standard orientation is written back and
+  pixel-dimension fields are updated. Default write behavior is unchanged.
+
 ## v2.38.1 (2026-10-08)
 
 ### Bug
