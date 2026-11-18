@@ -135,6 +135,9 @@ known_plugins["rawpy"] = PluginConfig(
 known_plugins["pydicom"] = PluginConfig(
     name="pydicom", class_name="PydicomPlugin", module_name="imageio.plugins.pydicom"
 )
+known_plugins["qoi"] = PluginConfig(
+    name="qoi", class_name="QoiPlugin", module_name="imageio.plugins.qoi"
+)
 
 # Legacy plugins
 # ==============

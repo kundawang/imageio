@@ -747,6 +747,12 @@ extension_list = [
         priority=["RAW-FI"],
     ),
     FileExtension(
+        name="Quite OK Image",
+        extension=".qoi",
+        priority=["qoi"],
+        external_link="https://qoiformat.org/qoi-spec.pdf",
+    ),
+    FileExtension(
         extension=".raf",
         priority=["RAW-FI"],
     ),

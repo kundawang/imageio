@@ -53,5 +53,8 @@ plugins to install and/or depend on in your project.
 :mod:`SPE <imageio.plugins.spe>`
     spe
 
+:mod:`QOI <imageio.plugins.qoi>`
+    qoi
+
 :mod:`SWF <imageio.plugins.swf>`
     swf
