@@ -409,6 +409,209 @@ def test_gif_first_p_frame():
     assert im.shape == (36, 150, 200, 3)
 
 
+def _corner_blink_frames(seed=0, size=64, corner=6):
+    """Three frames where only a small corner region changes."""
+
+    rng = np.random.default_rng(seed)
+    canvas = rng.integers(0, 255, (size, size, 4), dtype=np.uint8)
+    canvas[..., 3] = 255
+    frames = []
+    for color in [(255, 0, 0, 255), (0, 0, 255, 255), (255, 0, 0, 255)]:
+        frame = canvas.copy()
+        frame[:corner, :corner] = color
+        frames.append(frame)
+    return np.stack(frames)
+
+
+def _decode_gif(blob):
+    """Return composited RGBA frames, per-frame duration, tile and disposal."""
+
+    decoded, durations, tiles, disposals = [], [], [], []
+    n_frames = Image.open(io.BytesIO(blob)).n_frames
+    for index in range(n_frames):
+        image = Image.open(io.BytesIO(blob))
+        image.seek(index)
+        tile = image.tile[0][1] if image.tile else (0, 0) + image.size
+        disposals.append(image.disposal_method)
+        durations.append(image.info.get("duration"))
+        image.load()
+        decoded.append(np.asarray(image.convert("RGBA")))
+        tiles.append(tile)
+    return np.stack(decoded), durations, tiles, disposals, n_frames
+
+
+def _assert_visually_equal(readback, original, color_tol=60):
+    # alpha must be exact; RGB is compared only on opaque input pixels
+    alpha_diff = np.abs(
+        readback[..., 3].astype(int) - original[..., 3].astype(int)
+    ).max()
+    opaque = original[..., 3] == 255
+    color_diff = np.abs(readback[..., :3].astype(int) - original[..., :3].astype(int))[
+        opaque
+    ].max()
+    assert alpha_diff == 0
+    assert color_diff <= color_tol
+
+
+def test_gif_subrectangles_corner_blink():
+    # the headline case: a tiny icon blinks while the full canvas is noisy
+    frames = _corner_blink_frames()
+    durations = [100, 200, 300]
+
+    full = iio.imwrite("<bytes>", frames, extension=".gif", duration=durations, loop=0)
+    delta = iio.imwrite(
+        "<bytes>",
+        frames,
+        extension=".gif",
+        duration=durations,
+        loop=0,
+        subrectangles=True,
+    )
+
+    readback, got_durations, tiles, disposals, n_frames = _decode_gif(delta)
+
+    # only the corner region is stored after the first frame, so the file
+    # is markedly smaller than full frames
+    assert len(delta) < len(full)
+    # the first frame always covers the whole canvas
+    assert n_frames == 3
+    assert tiles[0] == (0, 0, 64, 64)
+    assert tiles[1:] == [(0, 0, 6, 6), (0, 0, 6, 6)]
+    # every playback instant matches the full-frame input, with exact delays
+    for index in range(3):
+        _assert_visually_equal(readback[index], frames[index])
+        assert got_durations[index] == durations[index]
+    # do-not-dispose keeps the composited canvas intact
+    assert disposals == [1, 1, 1]
+
+
+def test_gif_subrectangles_default_unchanged():
+    frames = _corner_blink_frames()
+    kwargs = dict(extension=".gif", duration=[100, 200, 300], loop=0)
+    first = iio.imwrite("<bytes>", frames, **kwargs)
+    second = iio.imwrite("<bytes>", frames, **kwargs)
+    assert first == second
+
+
+def test_gif_subrectangles_keeps_identical_frame():
+    frames = _corner_blink_frames()
+    sequence = np.stack([frames[0], frames[0].copy(), frames[1]])
+
+    blob = iio.imwrite(
+        "<bytes>",
+        sequence,
+        extension=".gif",
+        duration=[100, 250, 300],
+        subrectangles=True,
+    )
+    readback, durations, tiles, _, n_frames = _decode_gif(blob)
+
+    # the identical frame is retained (not merged) with its own delay
+    assert n_frames == 3
+    assert durations == [100, 250, 300]
+    assert tiles[1] == (0, 0, 1, 1)
+    assert np.array_equal(readback[1], readback[0])
+
+
+def test_gif_subrectangles_transparent_erase():
+    base = np.zeros((64, 64, 4), np.uint8)
+    base[12:52, 12:52] = (90, 140, 200, 255)
+    appears = base.copy()
+    appears[:6, :6] = (255, 255, 255, 255)
+    disappears = base.copy()  # corner goes back to fully transparent
+
+    blob = iio.imwrite(
+        "<bytes>",
+        np.stack([base, appears, disappears]),
+        extension=".gif",
+        duration=[100, 200, 300],
+        subrectangles=True,
+    )
+    readback, _, _, disposals, _ = _decode_gif(blob)
+
+    _assert_visually_equal(readback[0], base)
+    _assert_visually_equal(readback[1], appears)
+    _assert_visually_equal(readback[2], disappears)
+    # erasing content requires restore-to-background on the preceding frame
+    assert disposals[1] == 2
+    assert readback[1][3, 3, 3] == 255
+    assert readback[2][3, 3, 3] == 0
+
+
+def test_gif_subrectangles_palette_change():
+    # each frame introduces a brand-new corner color; per-tile local
+    # palettes must represent them correctly
+    frames = []
+    for color in [(255, 0, 0, 255), (0, 0, 255, 255), (255, 255, 0, 255)]:
+        frame = np.zeros((64, 64, 4), np.uint8)
+        frame[20:44, 20:44] = (0, 200, 0, 255)
+        frame[:6, :6] = color
+        frames.append(frame)
+
+    blob = iio.imwrite(
+        "<bytes>",
+        np.stack(frames),
+        extension=".gif",
+        duration=[100, 200, 300],
+        subrectangles=True,
+    )
+    readback, _, _, _, _ = _decode_gif(blob)
+    for index, frame in enumerate(frames):
+        _assert_visually_equal(readback[index], frame)
+
+
+def test_gif_subrectangles_mismatched_sizes():
+    with pytest.raises(ValueError, match="same width and height"):
+        iio.imwrite(
+            "<bytes>",
+            [np.zeros((32, 32, 4), np.uint8), np.zeros((16, 16, 4), np.uint8)],
+            extension=".gif",
+            subrectangles=True,
+        )
+
+
+def test_gif_subrectangles_single_frame():
+    frames = _corner_blink_frames()
+    blob = iio.imwrite(
+        "<bytes>",
+        frames[0][None],
+        extension=".gif",
+        duration=150,
+        subrectangles=True,
+    )
+    readback, durations, tiles, _, n_frames = _decode_gif(blob)
+    assert n_frames == 1
+    assert tiles[0] == (0, 0, 64, 64)
+    assert durations == [150]
+    _assert_visually_equal(readback[0], frames[0])
+
+
+def test_gif_subrectangles_large_sequence():
+    frames = np.repeat(_corner_blink_frames(), 20, axis=0)  # 60 frames
+    blob = iio.imwrite(
+        "<bytes>", frames, extension=".gif", duration=50, subrectangles=True
+    )
+    readback, durations, _, _, n_frames = _decode_gif(blob)
+    assert n_frames == 60
+    assert all(duration == 50 for duration in durations)
+    for index in range(n_frames):
+        _assert_visually_equal(readback[index], frames[index])
+
+
+def test_gif_subrectangles_loop_count():
+    frames = _corner_blink_frames()
+    blob = iio.imwrite(
+        "<bytes>",
+        frames,
+        extension=".gif",
+        duration=[100, 200, 300],
+        loop=2,
+        subrectangles=True,
+    )
+    index = blob.find(b"NETSCAPE2.0")
+    assert blob[index + 13 : index + 15] == (2).to_bytes(2, "little")
+
+
 def test_legacy_exif_orientation(test_images, tmp_path):
     from PIL.Image import Exif
 

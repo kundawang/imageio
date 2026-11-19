@@ -100,6 +100,8 @@ class PillowPlugin(PluginV3):
 
         self._image: Image = None
         self.images_to_write = []
+        # GIF delta-frame mode, toggled through write(subrectangles=True)
+        self._gif_subrectangles = False
 
         if request.mode.io_mode == IOMode.read:
             try:
@@ -392,6 +394,21 @@ class PillowPlugin(PluginV3):
             provided ``mode`` or ``image.shape``. While the latter often works,
             it may cause problems for small images due to aliasing of spatial
             and color-channel axes.
+        subrectangles : bool
+            Only used when writing GIFs. If True, encode each frame relative
+            to the previous composited frame and store only the bounding
+            box of the pixels that changed (the first frame always covers
+            the whole canvas). This can substantially reduce the file size
+            for animations where a small region changes, such as a
+            blinking icon. Per-frame delays, the loop count and
+            transparency are preserved and the decoded animation is
+            visually identical to writing full frames. Frames of unequal
+            size cannot be encoded this way and raise a ``ValueError``.
+            Defaults to False, which keeps Pillow's full-frame behavior.
+            When writing frame by frame, the flag is sticky for the
+            lifetime of the open writer, so it only needs to be passed on
+            the first write. Writing to ``"<bytes>"`` flushes after every
+            call, so for that target pass all frames in a single write.
         kwargs : ...
             Extra arguments to pass to pillow. If a writer doesn't recognise an
             option, it is silently ignored. The available options are described
@@ -414,7 +431,21 @@ class PillowPlugin(PluginV3):
             )
             kwargs["duration"] = 1000 * 1 / kwargs.get("fps")
 
+        # GIF-only option consumed by imageio; never forwarded to Pillow.
+        # It is sticky across incremental writes within one open() call.
+        if "subrectangles" in kwargs:
+            self._gif_subrectangles = bool(kwargs.pop("subrectangles"))
+
         if isinstance(ndimage, list):
+            if self._gif_subrectangles:
+                # np.stack would raise an opaque error; report the GIF
+                # constraint with a clear message instead.
+                spatial_shapes = {np.asarray(frame).shape[:2] for frame in ndimage}
+                if len(spatial_shapes) > 1:
+                    raise ValueError(
+                        "`subrectangles=True` requires all frames to share the "
+                        "same width and height."
+                    )
             ndimage = np.stack(ndimage, axis=0)
             is_batch = True
         else:
@@ -492,6 +523,21 @@ class PillowPlugin(PluginV3):
             return
 
         primary_image = self.images_to_write.pop(0)
+
+        is_gif = self.save_args.get("format") == "GIF"
+        if is_gif and self._gif_subrectangles:
+            from ._gif import write_gif_with_subrectangles
+
+            all_frames = [primary_image] + self.images_to_write
+            write_gif_with_subrectangles(
+                self._request.get_file(),
+                all_frames,
+                **self.save_args,
+            )
+            self.images_to_write.clear()
+            self.save_args.clear()
+            self._gif_subrectangles = False
+            return
 
         if len(self.images_to_write) > 0:
             self.save_args["save_all"] = True
